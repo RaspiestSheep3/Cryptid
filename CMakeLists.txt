@@ -19,3 +19,15 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
 endif()
 
 # TODO: Add tests and install targets if needed.
+# Path to vcpkg install
+set(VCPKG_ROOT "C:/Users/iniga/vcpkg/installed/x64-windows")
+
+# Include path
+target_include_directories(Cryptid PRIVATE "${VCPKG_ROOT}/include")
+
+# Library path
+target_link_libraries(Cryptid PRIVATE "${VCPKG_ROOT}/lib/libsodium.lib")
+
+
+# Link the library manually
+target_link_libraries(Cryptid PRIVATE sodium)
