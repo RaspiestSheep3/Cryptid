@@ -28,6 +28,3 @@ target_include_directories(Cryptid PRIVATE "${VCPKG_ROOT}/include")
 # Library path
 target_link_libraries(Cryptid PRIVATE "${VCPKG_ROOT}/lib/libsodium.lib")
 
-
-# Link the library manually
-target_link_libraries(Cryptid PRIVATE sodium)

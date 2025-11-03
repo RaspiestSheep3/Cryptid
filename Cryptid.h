@@ -13,3 +13,4 @@
 #include <fstream>
 #include <ctime>
 #include <sodium.h>
+#include <cmath>
