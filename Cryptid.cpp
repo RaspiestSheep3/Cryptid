@@ -5,11 +5,16 @@ using namespace std;
 namespace fs = std::filesystem;
 
 //Command variables
-const uint16_t volumeMetadataSize = 4096; //In bytes
+const uint64_t volumeMetadataSize = 256 * 256 * 256; //In bytes
 const uint16_t keyFileSize = 4096; //In bytes, 4096 should be a good amount
 const uint16_t sectorSize = 512; //In bytes, 512 or 4096
 const uint8_t chacha20NonceSize = 12; //Fixed I think
 const uint8_t bytesForSectorCount = 4; //This should allow up to ~2.2 TB volumes using a 512B sector size, or ~17.6 TB if using 4096B - probably overkill but 3 bytes is too small
+//Note so I don't forget how I did this : 2^32 sectors, each sector is 512 bytes so (2^32 * 512) / 10^12 ~= 2.2 TB
+const uint8_t maxFileLengthName = 120; //In chars
+//When combined with the set metadata size, this should support 131072 files in 1 volume
+// This is probably overkill but we support 2.2TB so might as well 
+//Only issue is the volume Metadata is like 2MB but o well 
 
 //Runtime Variables
 bool running = true;
@@ -20,7 +25,6 @@ string usedAlgorithm;
 string loadedVolumePath;
 unsigned char loadedVolumeMetadata[volumeMetadataSize - chacha20NonceSize] = {0};
 unsigned char loadedVolumeNonce[chacha20NonceSize] = {0};
-
 
 //Startup
 void StartupDisplay() {
@@ -44,12 +48,13 @@ void CommandHelp(vector<string> args) {
 	cout << "deleteVolume - Deletes a volume at a given file path" << endl; //NTS : overwriting passes
 	cout << "loadVolume ~volumePath - Targets a volume - the loaded volume is always targeted by commands" << endl;
 	cout << "renameVolume ~newVolumeName - Renames a volume at a given file path" << endl;
-	cout << "volumeDetails - Returns details about a volume" << endl; //NTS: size closed, size opened
+	cout << "volumeDetails - Returns details about a volume" << endl;
 	cout << "-------------" << endl;
 	
 	cout << "File Handling Commands : " << endl;
 	cout << "compressExtensionType ~extensionType - Compresses all files with a given extension type" << endl;
 	cout << "copyToVolume ~filePath - Copies a file to a volume" << endl; //TODO : Add algorithm support to metadata and use that
+	cout << "copyFolderToVolume ~folderPath - Copies all files in a folder to a volume" << endl; //TODO : Add algorithm support to metadata and use that
 	cout << "deleteFromVolume ~fileName - Deletes a file from a volume" << endl; //NTS : overwriting passes
 	cout << "extractFromVolume ~fileName - Extracts a file from a volume without deleting the original" << endl;
 	cout << "-------------" << endl;
@@ -95,7 +100,7 @@ void CommandLoadVolume(vector<string> args) {
 	}
 }
 
-void CommandCreateVolume(vector<string> args) {
+void CommandCreateVolume(vector<string> args) { //TODO : Fix this stack business
 
 	string path = args[0] + "\\" + args[1] + ".cpd";
 
@@ -123,17 +128,65 @@ void CommandCreateVolume(vector<string> args) {
 	//Creating the information holder for the file - this will be fixed according to a command variable
 	//At the moment it is blank because we have no metadata
 	//Note : sector counting starts from 0
-	char metadata[volumeMetadataSize] = {0x00};
+	vector<char> metadata(volumeMetadataSize, 0x00);
 
 	if (usedAlgorithm == "ChaCha20") {
 		//Writing the nonce to the first 12 bytes of metadata
-		randombytes_buf(metadata, chacha20NonceSize);
+		randombytes_buf(metadata.data(), chacha20NonceSize);
 	}
 
-	volume.write(metadata, volumeMetadataSize);
+	volume.write(metadata.data(), volumeMetadataSize);
 	
 	volume.close();
 	CommandLoadVolume(vector<string>{path});
+}
+
+void CommandVolumeDetails(vector<string> args) {
+	//Debugging
+	//cout << "TEMP : Volume metadata debugging : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
+	
+	//First available sector
+	uint32_t firstAvailableSector = 0;
+	for (int i = 0; i < bytesForSectorCount; i++) firstAvailableSector |= (loadedVolumeMetadata[i] << ((bytesForSectorCount - 1 - i) * 8)); //This better work for big-endian
+	cout << "First Available Sector : Sector " << firstAvailableSector << endl;
+	
+	//Space used
+
+	double volumeSize = fs::file_size(fs::path(loadedVolumePath)) - volumeMetadataSize;
+
+	float volumeSizeEdited = 0;
+	string volumeSizePrefix = " B";
+
+	if (volumeSize < 1024) volumeSizeEdited = volumeSize;
+	else if (volumeSize < 1024 * 1024) { volumeSizeEdited = volumeSize / 1024; volumeSizePrefix = " KB"; }
+	else if (volumeSize < 1024 * 1024 * 1024) { volumeSizeEdited = volumeSize / (1024 * 1024); volumeSizePrefix = " MB"; }
+	else if (volumeSize < 1024ULL * 1024 * 1024 * 1024) { volumeSizeEdited = volumeSize / (1024 * 1024 * 1024); volumeSizePrefix = " GB"; }
+	else if (volumeSize < 1024ULL * 1024 * 1024 * 1024 * 1024) { volumeSizeEdited = volumeSize / (1024ULL * 1024 * 1024 * 1024); volumeSizePrefix = " TB"; }
+
+	cout << "Size of stored files : " << round(volumeSizeEdited * 100 ) / 100 << volumeSizePrefix << endl;
+
+	//Listing each file and how many sectors it uses
+	//Each entry has first sector and amount of sectors used
+	struct FileEntry {
+		uint64_t startSector;
+		uint64_t sectorCount;
+		string fileName;
+	};
+
+	vector<FileEntry> filesInVolume;
+
+	uint16_t charCounter = bytesForSectorCount;
+	while (!all_of(loadedVolumeMetadata + charCounter, loadedVolumeMetadata + charCounter + bytesForSectorCount, [](unsigned char c) { return c == 0; })) {
+		uint64_t startSectorFile = 0;
+		uint64_t sectorCountFile = 0;
+		string fileNameFile = "";
+
+		for (int i = 0; i < bytesForSectorCount; i++) startSectorFile |= (static_cast<uint64_t>(loadedVolumeMetadata[charCounter + i]) << ((bytesForSectorCount - 1 - i) * 8));
+		for (int i = bytesForSectorCount; i < 2*bytesForSectorCount; i++) startSectorFile |= (static_cast<uint64_t>(loadedVolumeMetadata[charCounter + i]) << ((bytesForSectorCount - 1 - i - bytesForSectorCount) * 8));
+		charCounter += 2 * bytesForSectorCount;
+
+
+	}
 }
 
 //File management commands
@@ -181,18 +234,68 @@ void CommandCopyToVolume(vector<string> args) {
 	unsigned char newSectorWrite[bytesForSectorCount];
 	volume.seekp(chacha20NonceSize);
 	for (int i = 0; i < bytesForSectorCount; i++) {
-		loadedVolumeMetadata[i] = nextAvailableSector & (1 << (bytesForSectorCount - 1 - i) * 8);
-		newSectorWrite[i] = nextAvailableSector & (1 << (bytesForSectorCount - 1 - i) * 8);
+		loadedVolumeMetadata[i] = (nextAvailableSector >> (8 * (bytesForSectorCount - 1 - i))) & 0xFF;
+		newSectorWrite[i] = (nextAvailableSector >> (8 * (bytesForSectorCount - 1 - i))) & 0xFF;
+		//cout << "TEMP : Available Section Metadata : " << i << " " << (int)loadedVolumeMetadata[i] << endl;
 	}
 
-	volume.write(reinterpret_cast<char*>(newSectorWrite), 4);
+	volume.write(reinterpret_cast<char*>(newSectorWrite), bytesForSectorCount);
 
 	//Adding the file data to the metadata
 	//I think we need to use 4 bytes for each section code 
-	//TODO!
+	
+	//Finding the first available char
+	uint32_t firstFreeCharPos = 0;
+
+	for (uint32_t i = bytesForSectorCount; i < volumeMetadataSize; i++) {
+		if (loadedVolumeMetadata[i] == 0) {
+			firstFreeCharPos = i;
+			break;
+		}
+	}
+
+	//cout << "TEMP : firstFreeCharPos" << firstFreeCharPos << endl;
+
+	volume.seekp(firstFreeCharPos);
+
+	string filename = fs::path(args[0]).filename().string();
+	//Padding string name with 0xFF - this should work because filename should be ASCII
+	while(filename.length() < maxFileLengthName) filename += 0xFF;
+	
+	vector <unsigned char> newSectorDataToWrite(bytesForSectorCount * 2 + filename.size());
+
+	for (int i = firstFreeCharPos; i < firstFreeCharPos + bytesForSectorCount; i++) {
+		loadedVolumeMetadata[i] = (firstAvailableSector >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;
+		newSectorDataToWrite[i - firstFreeCharPos] = (firstAvailableSector >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;
+	}
+
+	for (int i = firstFreeCharPos + bytesForSectorCount; i < firstFreeCharPos + 2 * bytesForSectorCount; i++) {
+		loadedVolumeMetadata[i] = (sectorsNeeded >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;
+		newSectorDataToWrite[i - firstFreeCharPos] = (sectorsNeeded >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;;
+	}
+
+	uint16_t counter = firstFreeCharPos + 2* bytesForSectorCount;
+
+	for (char character : filename) {
+		loadedVolumeMetadata[counter] = character;
+		newSectorDataToWrite[counter - firstFreeCharPos] = character;
+		counter++;
+	}
+	
+	vector<unsigned char> encryptedNewSectorDataToWrite(newSectorDataToWrite.size());
+
+	//Encrypting newSectorDataToWrite with ChaCha20
+	if (usedAlgorithm == "ChaCha20") {
+		crypto_stream_chacha20_xor(encryptedNewSectorDataToWrite.data(), newSectorDataToWrite.data(), newSectorDataToWrite.size(), loadedVolumeNonce, passwordHashed);
+	}
+
+	volume.write(reinterpret_cast<char*>(encryptedNewSectorDataToWrite.data()), encryptedNewSectorDataToWrite.size());
+
 
 	volume.close();
 	targetFile.close();
+
+	//cout << "TEMP : Volume metadata debugging : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
 }
 
 //Cryptography commands
@@ -240,6 +343,7 @@ unordered_map<string, function<void(vector<string>)>> commands = {
 	{"quit", CommandQuit},
 	{"createVolume", CommandCreateVolume},
 	{"loadVolume", CommandLoadVolume},
+	{"volumeDetails", CommandVolumeDetails},
 	{"copyToVolume", CommandCopyToVolume},
 	{"generateKeyFile", CommandGenerateKeyFile},
 	{"loadPassword", CommandLoadPassword}
