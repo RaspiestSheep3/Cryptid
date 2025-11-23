@@ -34,6 +34,24 @@ void StartupDisplay() {
 	cout << "Cryptid has started \nInput help to get a list of available commands" << endl;
 }
 
+//Helper functions
+int FindFirst128Zeros(const std::vector<unsigned char>& data) {
+	int consecutive = 0;
+
+	for (size_t i = 0; i < data.size(); ++i) {
+		if (data[i] == 0x00) {
+			consecutive++;
+			if (consecutive == 128) {
+				return static_cast<int>(i - 127); // start index of the 128 zeros
+			}
+		}
+		else {
+			consecutive = 0; // reset counter
+		}
+	}
+	return -1; // not found
+}
+
 //*Commands
 //General commands
 void CommandHelp(vector<string> args) {
@@ -81,7 +99,7 @@ void CommandQuit(vector<string> args) {
 //Volume management commands
 
 //Has to be out of alphabetical order because CommandCreateVolume calls it
-void CommandLoadVolume(vector<string> args) { 
+void CommandLoadVolume(vector<string> args) {
 	loadedVolumePath = args[0]; 
 
 	//Getting and decrypting the metadata
@@ -98,17 +116,44 @@ void CommandLoadVolume(vector<string> args) {
 		memcpy(loadedVolumeNonce, encryptedMetadata.data(), chacha20NonceSize);
 
 		encryptedMetadata = vector<unsigned char>(encryptedMetadata.begin() + 12, encryptedMetadata.end());
-		//Putting in a check because we don't encrypt the all 0s
-		
-		//!LABEL
-		if (any_of(encryptedMetadata.begin(), encryptedMetadata.end(), [](unsigned char c) { return c != 0; })) crypto_stream_chacha20_xor(loadedVolumeMetadata, encryptedMetadata.data(), volumeMetadataSize - chacha20NonceSize, loadedVolumeNonce, passwordHashed);
-		else cout << "Did not decrypt anything" << endl;
+
+
+		int snipPoint = FindFirst128Zeros(encryptedMetadata);
+		if (snipPoint < 0) snipPoint = snipPoint = encryptedMetadata.size();
+
+		cout << "Snip point : " << dec << snipPoint << endl;
+
+		encryptedMetadata = vector<unsigned char>(encryptedMetadata.begin(), encryptedMetadata.begin() + snipPoint);
+
+		for (int i = 4; i < encryptedMetadata.size(); i += 2 * bytesForSectorCount + lengthBytes + maxFileLengthName) {
+			vector<unsigned char> decryptedMetadata(2 * bytesForSectorCount + lengthBytes + maxFileLengthName);
+
+			//cout << "CHACHA20 COUNTER : " << dec << (i - 4) / (2 * bytesForSectorCount + lengthBytes + maxFileLengthName)  << endl;
+
+			crypto_stream_chacha20_xor_ic(decryptedMetadata.data(), encryptedMetadata.data() + i, decryptedMetadata.size(), loadedVolumeNonce, (i - 4) / (2 * bytesForSectorCount + lengthBytes + maxFileLengthName), passwordHashed);
+			
+			if (all_of(decryptedMetadata.begin(), decryptedMetadata.end(),
+				[](unsigned char c) { return c == 0x00 || c == 0xFF; }) || all_of(encryptedMetadata.begin(), encryptedMetadata.begin() + decryptedMetadata.size(),
+					[](unsigned char c) { return c == 0x00 || c == 0xFF; }))
+			{
+				cout << "Stopping" << endl;  break;
+			}
+			memcpy(loadedVolumeMetadata + i, decryptedMetadata.data(), decryptedMetadata.size());
+		}
 	}
-
+	for (int i = 0; i < 4; i++) loadedVolumeMetadata[i] = encryptedMetadata[i];
 	cout << "Completed loading" << endl;
-}
 
-void CommandCreateVolume(vector<string> args) { //TODO : Fix this stack business
+	//Check 1 - First sections
+	cout << hex << "First sections : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
+	//Check 2 - First sections
+	cout << hex << "Section A : " << (int)loadedVolumeMetadata[4] << " " << (int)loadedVolumeMetadata[5] << " " << (int)loadedVolumeMetadata[6] << " " << (int)loadedVolumeMetadata[7] << endl;
+	cout << hex << "Section B : " << (int)loadedVolumeMetadata[8] << " " << (int)loadedVolumeMetadata[9] << " " << (int)loadedVolumeMetadata[10] << " " << (int)loadedVolumeMetadata[11] << endl;
+	cout << hex << "Section C : " << (int)loadedVolumeMetadata[12] << " " << (int)loadedVolumeMetadata[13] << endl;
+	cout << hex << "Section D : " << (int)loadedVolumeMetadata[14] << " " << (int)loadedVolumeMetadata[15] << " " << (int)loadedVolumeMetadata[16] << " " << (int)loadedVolumeMetadata[17] << endl;
+} 
+
+void CommandCreateVolume(vector<string> args) { 
 
 	string path = args[0] + "\\" + args[1] + ".cpd";
 
@@ -442,7 +487,7 @@ void CommandCopyToVolume(vector<string> args) {
 			for (int j = targetFile.gcount(); j < sectorSize; j++) buffer[j] = 0xFF;
 		}
 
-		crypto_stream_chacha20_xor_ic(encryptedBuffer.data(), buffer.data(), buffer.size(), loadedVolumeNonce, UINT32_MAX - i, passwordHashed);
+		crypto_stream_chacha20_xor_ic(encryptedBuffer.data(), buffer.data(), buffer.size(), loadedVolumeNonce, UINT32_MAX + i, passwordHashed);
 		volume.write(reinterpret_cast<char*>(encryptedBuffer.data()), sectorSize);
 	}
 
