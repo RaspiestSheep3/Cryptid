@@ -28,3 +28,10 @@ target_include_directories(Cryptid PRIVATE "${VCPKG_ROOT}/include")
 # Library path
 target_link_libraries(Cryptid PRIVATE "${VCPKG_ROOT}/lib/libsodium.lib")
 
+set(CMAKE_PREFIX_PATH "C:/Users/iniga/Qt/6.10.0/msvc2022_64/lib/cmake")
+find_package(Qt6 COMPONENTS Widgets REQUIRED)
+
+target_link_libraries(Cryptid PRIVATE Qt6::Widgets)
+
+qt_add_resources(Resources resources.qrc)
+target_sources(Cryptid PRIVATE ${Resources})

@@ -11,7 +11,8 @@ const uint16_t sectorSize = 512; //In bytes, 512 or 4096
 const uint8_t chacha20NonceSize = 12; //Fixed I think
 const uint8_t bytesForSectorCount = 4; //This should allow up to ~2.2 TB volumes using a 512B sector size, or ~17.6 TB if using 4096B - probably overkill but 3 bytes is too small
 //Note so I don't forget how I did this : 2^32 sectors, each sector is 512 bytes so (2^32 * 512) / 10^12 ~= 2.2 TB
-const uint8_t maxFileLengthName = 120; //In chars
+const uint8_t lengthBytes = 2;
+const uint8_t maxFileLengthName = 118; //In chars
 //When combined with the set metadata size, this should support 131072 files in 1 volume
 // This is probably overkill but we support 2.2TB so might as well 
 //Only issue is the volume Metadata is like 2MB but o well 
@@ -19,8 +20,9 @@ const uint8_t maxFileLengthName = 120; //In chars
 //Runtime Variables
 bool running = true;
 
-unsigned char passwordHashed[crypto_hash_sha256_BYTES]; //Should be set to 32 bytes
-string usedAlgorithm;
+//!REMOVE THIS ASAP THIS SI JUST FOR TESTING
+unsigned char passwordHashed[crypto_hash_sha256_BYTES] = { 1 }; //Should be set to 32 bytes
+string usedAlgorithm = "ChaCha20";
 
 string loadedVolumePath;
 unsigned char loadedVolumeMetadata[volumeMetadataSize - chacha20NonceSize] = {0};
@@ -91,13 +93,19 @@ void CommandLoadVolume(vector<string> args) {
 	volume.close();
 
 	//ChaCha20
+	cout << "Used algorithm : " << usedAlgorithm << endl;
 	if (usedAlgorithm == "ChaCha20") {
 		memcpy(loadedVolumeNonce, encryptedMetadata.data(), chacha20NonceSize);
 
 		encryptedMetadata = vector<unsigned char>(encryptedMetadata.begin() + 12, encryptedMetadata.end());
 		//Putting in a check because we don't encrypt the all 0s
-		if (!any_of(encryptedMetadata.begin(), encryptedMetadata.end(), [](unsigned char c) { return c != 0; })) crypto_stream_chacha20_xor(loadedVolumeMetadata, encryptedMetadata.data(), volumeMetadataSize - chacha20NonceSize, loadedVolumeNonce, passwordHashed);
+		
+		//!LABEL
+		if (any_of(encryptedMetadata.begin(), encryptedMetadata.end(), [](unsigned char c) { return c != 0; })) crypto_stream_chacha20_xor(loadedVolumeMetadata, encryptedMetadata.data(), volumeMetadataSize - chacha20NonceSize, loadedVolumeNonce, passwordHashed);
+		else cout << "Did not decrypt anything" << endl;
 	}
+
+	cout << "Completed loading" << endl;
 }
 
 void CommandCreateVolume(vector<string> args) { //TODO : Fix this stack business
@@ -143,7 +151,7 @@ void CommandCreateVolume(vector<string> args) { //TODO : Fix this stack business
 
 void CommandVolumeDetails(vector<string> args) {
 	//Debugging
-	//cout << "TEMP : Volume metadata debugging : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
+	cout << "TEMP : Volume metadata debugging : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
 	
 	//First available sector
 	uint32_t firstAvailableSector = 0;
@@ -175,30 +183,42 @@ void CommandVolumeDetails(vector<string> args) {
 
 	vector<FileEntry> filesInVolume;
 
-	uint16_t charCounter = bytesForSectorCount;
-	while (!all_of(loadedVolumeMetadata + charCounter, loadedVolumeMetadata + charCounter + bytesForSectorCount, [](unsigned char c) { return c == 0; })) {
-		uint64_t startSectorFile = 0;
-		uint64_t sectorCountFile = 0;
-		string fileNameFile = "";
+	uint16_t charCounter = 4;
 
-		for (int i = 0; i < bytesForSectorCount; i++) startSectorFile |= (static_cast<uint64_t>(loadedVolumeMetadata[charCounter + i]) << ((bytesForSectorCount - 1 - i) * 8));
-		for (int i = bytesForSectorCount; i < 2*bytesForSectorCount; i++) startSectorFile |= (static_cast<uint64_t>(loadedVolumeMetadata[charCounter + i]) << ((bytesForSectorCount - 1 - i - bytesForSectorCount) * 8));
-		charCounter += 2 * bytesForSectorCount;
+	//Visualising an entry
+	size_t entrySize = 2 * bytesForSectorCount + lengthBytes + maxFileLengthName;
 
+	while (!all_of(loadedVolumeMetadata + charCounter,
+		loadedVolumeMetadata + charCounter + entrySize,
+		[](unsigned char c) { return c == 0; }))
+	{
+		// Debug hex dump of full entry
+		for (int i = 2 * bytesForSectorCount + lengthBytes; i < entrySize; i++) {
+			if (static_cast<int>(loadedVolumeMetadata[charCounter + i]) == 0xFF) { break; }
+			cout << (loadedVolumeMetadata[charCounter + i]);
+		}
+		cout << dec << endl;
 
+		charCounter += entrySize;
 	}
 }
 
 //File management commands
-void CommandCopyToVolume(vector<string> args) {
+void CommandCopyToVolumeOld(vector<string> args) {
+	//Looking at the first 4 bytes of metadat
+	cout << "Metadata : " << dec << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
+
 	//Finding first available sector
-	uint32_t firstAvailableSector = 0;
-	for (int i = 3; i > -1; i--) firstAvailableSector |= ((uint32_t)loadedVolumeMetadata[3 - i] << ((3 - i) * 8));
+	uint32_t firstAvailableSector =
+		(loadedVolumeMetadata[0] << 24) |
+		(loadedVolumeMetadata[1] << 16) |
+		(loadedVolumeMetadata[2] << 8) |
+		(loadedVolumeMetadata[3]);
 	cout << "First available sector : " << firstAvailableSector << endl;
 
 	//Checking if we have enough space left
 	uint32_t maxAvailableSectors = UINT32_MAX - firstAvailableSector;
-	uint32_t sectorsNeeded = ceil(filesystem::file_size(args[0]) / (sectorSize));
+	uint32_t sectorsNeeded = static_cast<uint32_t>((filesystem::file_size(args[0]) + sectorSize - 1) / sectorSize);
 	if (sectorsNeeded > maxAvailableSectors) {
 		cout << "Not enough space available in this volume. Consider creating a new volume." << endl;
 		return;
@@ -209,7 +229,7 @@ void CommandCopyToVolume(vector<string> args) {
 	fstream volume(loadedVolumePath, ios::binary | std::ios::in | std::ios::out);
 	vector<unsigned char> buffer(sectorSize);
 
-	volume.seekp(volumeMetadataSize + firstAvailableSector*8);
+	volume.seekp(volumeMetadataSize + (firstAvailableSector)*sectorSize);
 
 	for (int i = firstAvailableSector; i < firstAvailableSector + sectorsNeeded; i++) {
 		targetFile.read(reinterpret_cast<char*>(buffer.data()), sectorSize);
@@ -233,11 +253,13 @@ void CommandCopyToVolume(vector<string> args) {
 	uint32_t nextAvailableSector = firstAvailableSector + sectorsNeeded;
 	unsigned char newSectorWrite[bytesForSectorCount];
 	volume.seekp(chacha20NonceSize);
-	for (int i = 0; i < bytesForSectorCount; i++) {
+	for (int i = 0; i < bytesForSectorCount; i++) { //TO FIX RIGHT THIS INSTANCE
 		loadedVolumeMetadata[i] = (nextAvailableSector >> (8 * (bytesForSectorCount - 1 - i))) & 0xFF;
 		newSectorWrite[i] = (nextAvailableSector >> (8 * (bytesForSectorCount - 1 - i))) & 0xFF;
-		//cout << "TEMP : Available Section Metadata : " << i << " " << (int)loadedVolumeMetadata[i] << endl;
+		cout << "TEMP : Available Section Metadata : " << i << " " << (int)loadedVolumeMetadata[i] << endl;
 	}
+
+	cout << "New Sector Write : " << newSectorWrite << endl;
 
 	volume.write(reinterpret_cast<char*>(newSectorWrite), bytesForSectorCount);
 
@@ -250,19 +272,29 @@ void CommandCopyToVolume(vector<string> args) {
 	for (uint32_t i = bytesForSectorCount; i < volumeMetadataSize; i++) {
 		if (loadedVolumeMetadata[i] == 0) {
 			firstFreeCharPos = i;
+
+			cout << "First Free Char Pos Check" << hex << (int)loadedVolumeMetadata[i] << " " << (int)loadedVolumeMetadata[i + 1] << " " << (int)loadedVolumeMetadata[i + 2] << " " << (int)loadedVolumeMetadata[i + 3] << dec << endl;
+
 			break;
 		}
 	}
 
-	//cout << "TEMP : firstFreeCharPos" << firstFreeCharPos << endl;
+	firstFreeCharPos += chacha20NonceSize;
+
+	cout << "TEMP : firstFreeCharPos " << firstFreeCharPos << endl;
 
 	volume.seekp(firstFreeCharPos);
 
 	string filename = fs::path(args[0]).filename().string();
+
+	cout << "Filename : " << filename << endl;
+
 	//Padding string name with 0xFF - this should work because filename should be ASCII
 	while(filename.length() < maxFileLengthName) filename += 0xFF;
 	
 	vector <unsigned char> newSectorDataToWrite(bytesForSectorCount * 2 + filename.size());
+
+	cout << dec << endl;
 
 	for (int i = firstFreeCharPos; i < firstFreeCharPos + bytesForSectorCount; i++) {
 		loadedVolumeMetadata[i] = (firstAvailableSector >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;
@@ -282,6 +314,13 @@ void CommandCopyToVolume(vector<string> args) {
 		counter++;
 	}
 	
+	//Visualising the new sector data to write
+	cout << newSectorDataToWrite.size() << "New Sector Data To Write : " << hex;
+	for (unsigned char sectorByte : newSectorDataToWrite) {
+		cout << static_cast<int>(sectorByte);
+	}
+	cout << dec << endl;
+
 	vector<unsigned char> encryptedNewSectorDataToWrite(newSectorDataToWrite.size());
 
 	//Encrypting newSectorDataToWrite with ChaCha20
@@ -295,7 +334,139 @@ void CommandCopyToVolume(vector<string> args) {
 	volume.close();
 	targetFile.close();
 
-	//cout << "TEMP : Volume metadata debugging : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
+	cout << "TEMP : Volume metadata debugging : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
+}
+
+void CommandCopyToVolume(vector<string> args) {
+	/*Format of the file :
+	0-12 : Nonce
+	Volume metadata : 13-256^3
+		0-3 - First available sector for writing
+		4-131 - File entry index 1
+			4-7 - First sector
+			8 - 11 - Amount of sectors we use
+			12-13 = Length of last sector
+			14 - 131 - File name
+	512 Byte sectors starting from 256^3
+	*/
+
+	ifstream targetFile(args[0], ios::binary);
+	fstream volume(loadedVolumePath, ios::binary | std::ios::in | std::ios::out);
+
+	//Step 1 - Find the first available sector we can write to
+	uint32_t firstAvailableSector = (
+		loadedVolumeMetadata[0] << 24 |
+		loadedVolumeMetadata[1] << 16 |
+		loadedVolumeMetadata[2] << 8 |
+		loadedVolumeMetadata[3]
+		);
+	cout << "First available sector : " << dec << firstAvailableSector << endl;
+
+	//Step 2 - Find the amount of sectors we need to use
+	uint32_t amountOfSectorsNeeded = (filesystem::file_size(args[0]) + sectorSize - 1) / sectorSize; //Needed to round up
+	cout << "Amount of Sectors Needed : " << amountOfSectorsNeeded << endl;
+
+	uint32_t maxAvailableSectors = UINT32_MAX - firstAvailableSector;
+	if (amountOfSectorsNeeded > maxAvailableSectors) {
+		cout << "Not enough space in this volume - make a new volume";
+		return;
+	}
+
+	//Step 3 - Find the first place we can make our entry
+	uint32_t fileEntryFirstIndex = UINT32_MAX;
+	for (int i = bytesForSectorCount; i < volumeMetadataSize - chacha20NonceSize; i += 2 * bytesForSectorCount + lengthBytes + maxFileLengthName) {
+
+		//Checking if the first 2*bytesForSectorCount slots are all 0 - if they are we can use this slot, else we go to the next slot
+		if (all_of(loadedVolumeMetadata + i, loadedVolumeMetadata + i + 2 * bytesForSectorCount, [](unsigned char c) { return c == 0; })) { fileEntryFirstIndex = i; break; }
+	}
+
+	if (fileEntryFirstIndex == UINT32_MAX) {
+		cout << "Volume Metadata Full";
+		return;
+	}
+
+	cout << "File Entry First Index : " << fileEntryFirstIndex << endl;
+
+	//Step 4 - create and write the entry
+	//We need to encrypt this whole entry
+	vector<unsigned char> unencryptedFileIndexEntry(2 * bytesForSectorCount + lengthBytes + maxFileLengthName, 0);
+
+	//Passing in the first sector we use
+	unencryptedFileIndexEntry[0] = (firstAvailableSector >> 24) & 0xFF; //We do the & to snip the first 0s
+	unencryptedFileIndexEntry[1] = (firstAvailableSector >> 16) & 0xFF;
+	unencryptedFileIndexEntry[2] = (firstAvailableSector >> 8) & 0xFF;
+	unencryptedFileIndexEntry[3] = (firstAvailableSector) & 0xFF;
+
+	//Passing in the amount of sectors we use
+	unencryptedFileIndexEntry[4] = (amountOfSectorsNeeded >> 24) & 0xFF; //We do the & to snip the first 0s
+	unencryptedFileIndexEntry[5] = (amountOfSectorsNeeded >> 16) & 0xFF;
+	unencryptedFileIndexEntry[6] = (amountOfSectorsNeeded >> 8) & 0xFF;
+	unencryptedFileIndexEntry[7] = (amountOfSectorsNeeded) & 0xFF;
+
+	//Passing in the length of the last sector
+	uint16_t lengthOfLastSector = filesystem::file_size(args[0]) % 512;
+	unencryptedFileIndexEntry[8] = (lengthOfLastSector >> 8) & 0xFF;
+	unencryptedFileIndexEntry[9] = (lengthOfLastSector) & 0xFF;
+
+
+	//Getting the file name and left-justifying it with 0xFF
+	string filename = fs::path(args[0]).filename().string();
+	cout << "Filename : " << filename << endl;
+	while (filename.length() < maxFileLengthName) filename += 0xFF;
+
+	//Setting the rest of the vector to the filename
+	for (int i = 0; i < maxFileLengthName; i++) {
+		unencryptedFileIndexEntry[2 * bytesForSectorCount + lengthBytes + i] = filename[i];
+	}
+
+	//Encrypting the entry
+	vector<unsigned char> encryptedFileIndexEntry(2 * bytesForSectorCount + lengthBytes + maxFileLengthName, 0);
+	uint32_t chaCha20Counter = (fileEntryFirstIndex - 4) / (2 * bytesForSectorCount + lengthBytes + maxFileLengthName);
+	cout << "ChaCha20Counter : " << chaCha20Counter << endl;
+	crypto_stream_chacha20_xor_ic(encryptedFileIndexEntry.data(), unencryptedFileIndexEntry.data(), unencryptedFileIndexEntry.size(), loadedVolumeNonce, chaCha20Counter, passwordHashed);
+
+	//Writing the entry
+	volume.seekp(chacha20NonceSize + fileEntryFirstIndex);
+	volume.write(reinterpret_cast<char*>(encryptedFileIndexEntry.data()), encryptedFileIndexEntry.size());
+
+	//Step 5 - Write the actual data
+	volume.seekp(chacha20NonceSize + volumeMetadataSize + firstAvailableSector * sectorSize);
+	vector<unsigned char> buffer(sectorSize, 0);
+	vector<unsigned char> encryptedBuffer(sectorSize, 0);
+
+	for (int i = firstAvailableSector; i < firstAvailableSector + amountOfSectorsNeeded; i++) {
+		targetFile.read(reinterpret_cast<char*>(buffer.data()), sectorSize);
+
+		if (targetFile.gcount() < sectorSize) {
+			//Padding
+			for (int j = targetFile.gcount(); j < sectorSize; j++) buffer[j] = 0xFF;
+		}
+
+		crypto_stream_chacha20_xor_ic(encryptedBuffer.data(), buffer.data(), buffer.size(), loadedVolumeNonce, UINT32_MAX - i, passwordHashed);
+		volume.write(reinterpret_cast<char*>(encryptedBuffer.data()), sectorSize);
+	}
+
+	//Step 6 - Reupdating the first available sector
+	uint32_t newFirstAvailableSector = firstAvailableSector + amountOfSectorsNeeded;
+	volume.seekp(chacha20NonceSize);
+	unsigned char newFirstAvailableSectorArr[4] = { 0 };
+	newFirstAvailableSectorArr[0] = (newFirstAvailableSector >> 24) & 0xFF;
+	newFirstAvailableSectorArr[1] = (newFirstAvailableSector >> 16) & 0xFF;
+	newFirstAvailableSectorArr[2] = (newFirstAvailableSector >> 8) & 0xFF;
+	newFirstAvailableSectorArr[3] = (newFirstAvailableSector) & 0xFF;
+
+	volume.write(reinterpret_cast<char*>(newFirstAvailableSectorArr), 4);
+
+
+	//Step 7 - update the metadata with our changes
+	for (int i = 0; i < unencryptedFileIndexEntry.size(); i++) {
+		loadedVolumeMetadata[fileEntryFirstIndex + i] = unencryptedFileIndexEntry[i];
+	}
+
+	loadedVolumeMetadata[0] = (newFirstAvailableSector >> 24) & 0xFF;
+	loadedVolumeMetadata[1] = (newFirstAvailableSector >> 16) & 0xFF;
+	loadedVolumeMetadata[2] = (newFirstAvailableSector >> 8) & 0xFF;
+	loadedVolumeMetadata[3] = (newFirstAvailableSector) & 0xFF;
 }
 
 //Cryptography commands
@@ -338,40 +509,100 @@ void CommandLoadPassword(vector<string> args) {
 }
 
 //Command management
-unordered_map<string, function<void(vector<string>)>> commands = {
-	{"help", CommandHelp},
-	{"quit", CommandQuit},
-	{"createVolume", CommandCreateVolume},
-	{"loadVolume", CommandLoadVolume},
-	{"volumeDetails", CommandVolumeDetails},
-	{"copyToVolume", CommandCopyToVolume},
-	{"generateKeyFile", CommandGenerateKeyFile},
-	{"loadPassword", CommandLoadPassword}
-};
 
-int main(){
+int main(int argc, char* argv[]){
 	//Variables
-	string input;
+	//string input;
 
-	//Startup
-	StartupDisplay();
+	QApplication app(argc, argv);
+	
+	QMainWindow mainWindow;
+	mainWindow.setWindowTitle("Cryptid");
+	mainWindow.resize(600, 400); // Initial size
 
-	while (running) {
-		cout << ">>";
-		getline(cin, input);
+	//qDebug() << "exists:" << QFile::exists(":/images/icon.png");
+	//qDebug() << "null:" << QIcon(":/images/icon.png").isNull();
 
-		if (input != "") {
-			//Findig all important data
-			istringstream iss(input);
-			vector<string> commandSplit;
-			string word;
+	app.setWindowIcon(QIcon(":/images/icon.png"));
 
-			while (iss >> word) commandSplit.push_back(word);
-
-			vector<string> commandArgs(commandSplit.begin() + 1, commandSplit.end());
-			if (commands.contains(commandSplit[0])) commands[commandSplit[0]](commandArgs);
-			else cout << "Command unknown" << endl;
-		}
+	QFile file(":/styles/style.qss");
+	if (file.open(QFile::ReadOnly | QFile::Text)) {
+		QString style = QString::fromUtf8(file.readAll());
+		app.setStyleSheet(style);
 	}
-	return 0;
+
+	// Create a central widget and a layout
+	QWidget* centralWidget = new QWidget(&mainWindow);
+	QVBoxLayout* layout = new QVBoxLayout(centralWidget);
+
+	QPushButton* loadVolumeBtn = new QPushButton("Load Volume");
+	QPushButton* createVolumeBtn= new QPushButton("Create Volume");
+	QPushButton* volumeDetailsBtn = new QPushButton("Volume Details");
+	QPushButton* addFileBtn = new QPushButton("Add Files To Volume");
+
+	vector <QPushButton*> btns = {loadVolumeBtn, createVolumeBtn, volumeDetailsBtn, addFileBtn};
+
+	for (QPushButton* btn : btns)
+	{
+		btn->setMinimumSize(100, 40); // button won’t shrink below this
+		btn->setMaximumSize(200, 60); // button won’t grow beyond this
+		layout->addWidget(btn);           // Add button to layout
+		layout->setAlignment(btn, Qt::AlignCenter); // Center it
+	}
+
+	QLabel* label = new QLabel("Enter volume name:");
+	QLineEdit* input = new QLineEdit();
+
+	//LoadVolume
+	QObject::connect(loadVolumeBtn, &QPushButton::clicked, [&]() {
+		QString filePath = QFileDialog::getOpenFileName(
+			nullptr,
+			"Open Volume File",
+			"",
+			"Volume Files (*.cpd);;All Files (*.*)"
+		);
+
+		CommandLoadVolume(vector<string> {filePath.toStdString()});
+		cout << "Loaded volume " << filePath.toStdString() << endl;
+	});
+
+	//Create Volume
+	QObject::connect(createVolumeBtn, &QPushButton::clicked, [&]() {
+		QString dir = QFileDialog::getExistingDirectory(
+			nullptr,
+			"Select Folder",
+			"",
+			QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
+		);
+
+		CommandCreateVolume(vector<string> {dir.toStdString(), (input->text()).toStdString()});
+	});
+
+	//Volume Details
+	QObject::connect(volumeDetailsBtn, &QPushButton::clicked, [&]() {
+		CommandVolumeDetails(vector<string> {});
+	});
+
+	//CopyFileToVolume
+	QObject::connect(addFileBtn, &QPushButton::clicked, [&]() {
+		QStringList files = QFileDialog::getOpenFileNames(
+			nullptr,
+			"Select Multiple Files",
+			"",
+			"All Files (*.*)"
+		);
+
+		for (QString file : files) {
+			CommandCopyToVolume(vector<string> {file.toStdString()});
+			cout << "Copied " << file.toStdString() << " to volume" << endl;
+		}
+	});
+
+	layout->addWidget(label);
+	layout->addWidget(input);
+
+	mainWindow.setCentralWidget(centralWidget); // Set central widget
+	mainWindow.show();
+
+	return app.exec();
 }

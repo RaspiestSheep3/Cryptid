@@ -14,3 +14,11 @@
 #include <ctime>
 #include <sodium.h>
 #include <cmath>
+#include <QApplication>
+#include <QPushButton>
+#include <qfile.h>
+#include <qmainwindow.h>
+#include <QVBoxLayout>
+#include <QFileDialog>
+#include <QLineEdit>
+#include <QLabel>
