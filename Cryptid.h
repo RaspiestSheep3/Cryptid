@@ -22,3 +22,4 @@
 #include <QFileDialog>
 #include <QLineEdit>
 #include <QLabel>
+#include <QCheckbox>

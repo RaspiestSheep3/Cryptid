@@ -20,8 +20,7 @@ const uint8_t maxFileLengthName = 118; //In chars
 //Runtime Variables
 bool running = true;
 
-//!REMOVE THIS ASAP THIS SI JUST FOR TESTING
-unsigned char passwordHashed[crypto_hash_sha256_BYTES] = { 1 }; //Should be set to 32 bytes
+unsigned char passwordHashed[crypto_hash_sha256_BYTES] = {0}; //Should be set to 32 bytes
 string usedAlgorithm = "ChaCha20";
 
 string loadedVolumePath;
@@ -72,7 +71,6 @@ void CommandHelp(vector<string> args) {
 	cout << "-------------" << endl;
 	
 	cout << "File Handling Commands : " << endl;
-	cout << "compressExtensionType ~extensionType - Compresses all files with a given extension type" << endl;
 	cout << "copyToVolume ~filePath - Copies a file to a volume" << endl; //TODO : Add algorithm support to metadata and use that
 	cout << "copyFolderToVolume ~folderPath - Copies all files in a folder to a volume" << endl; //TODO : Add algorithm support to metadata and use that
 	cout << "deleteFromVolume ~fileName - Deletes a file from a volume" << endl; //NTS : overwriting passes
@@ -85,10 +83,6 @@ void CommandHelp(vector<string> args) {
 	cout << "loadPassword ~password (~keyFilePath=None) (algorithm=ChaCha20) - Loads in a password + keyfile if passed in, and saves the algorithm" << endl; //Done
 	cout << "-------------" << endl;
 
-	cout << "NOTES : \n-------------" << endl;
-	cout << "- Do not use spaces in folder paths - make sure all involved folders have no spaces" << endl;
-	cout << "- If you do not want to fill an optional argument for a command, use _" << endl;
-	cout << "-------------" << endl;
 }
 
 void CommandQuit(vector<string> args) {
@@ -119,7 +113,7 @@ void CommandLoadVolume(vector<string> args) {
 
 
 		int snipPoint = FindFirst128Zeros(encryptedMetadata);
-		if (snipPoint < 0) snipPoint = snipPoint = encryptedMetadata.size();
+		if (snipPoint <= 0) snipPoint = snipPoint = encryptedMetadata.size();
 
 		cout << "Snip point : " << dec << snipPoint << endl;
 
@@ -160,23 +154,6 @@ void CommandCreateVolume(vector<string> args) {
 	cout << "Volume made at " << path << endl;
 
 	ofstream volume(path, ios::binary);
-
-	string owner;
-	if (args.size() < 3) owner = "_";
-	else owner = args[2];
-
-	string timestampStr = "_";
-	if (args.size() >= 4) {
-		transform(args[3].begin(), args[3].end(), args[3].begin(), ::tolower);
-		if (args[3] != "false") {
-			time_t timestamp = time(nullptr);
-			string timestampStr = ctime(&timestamp);
-		}
-	}
-	else {
-		time_t timestamp = time(nullptr);
-		string timestampStr = ctime(&timestamp);
-	}
 
 	//Creating the information holder for the file - this will be fixed according to a command variable
 	//At the moment it is blank because we have no metadata
@@ -249,138 +226,6 @@ void CommandVolumeDetails(vector<string> args) {
 }
 
 //File management commands
-void CommandCopyToVolumeOld(vector<string> args) {
-	//Looking at the first 4 bytes of metadat
-	cout << "Metadata : " << dec << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
-
-	//Finding first available sector
-	uint32_t firstAvailableSector =
-		(loadedVolumeMetadata[0] << 24) |
-		(loadedVolumeMetadata[1] << 16) |
-		(loadedVolumeMetadata[2] << 8) |
-		(loadedVolumeMetadata[3]);
-	cout << "First available sector : " << firstAvailableSector << endl;
-
-	//Checking if we have enough space left
-	uint32_t maxAvailableSectors = UINT32_MAX - firstAvailableSector;
-	uint32_t sectorsNeeded = static_cast<uint32_t>((filesystem::file_size(args[0]) + sectorSize - 1) / sectorSize);
-	if (sectorsNeeded > maxAvailableSectors) {
-		cout << "Not enough space available in this volume. Consider creating a new volume." << endl;
-		return;
-	}
-
-	//Reading and encrypting each block
-	ifstream targetFile(args[0], ios::binary);
-	fstream volume(loadedVolumePath, ios::binary | std::ios::in | std::ios::out);
-	vector<unsigned char> buffer(sectorSize);
-
-	volume.seekp(volumeMetadataSize + (firstAvailableSector)*sectorSize);
-
-	for (int i = firstAvailableSector; i < firstAvailableSector + sectorsNeeded; i++) {
-		targetFile.read(reinterpret_cast<char*>(buffer.data()), sectorSize);
-		
-		//Making the new nonce
-		unsigned char newNonce[chacha20NonceSize];
-		memcpy(newNonce, loadedVolumeNonce, chacha20NonceSize);
-
-		for (int j = bytesForSectorCount; j > 0; j--) newNonce[chacha20NonceSize - j] = (i >> ((j - 1) * 8)) & 0xFF;
-
-		unsigned char encryptedData[sectorSize];
-		crypto_stream_chacha20_xor(encryptedData, buffer.data(), sectorSize,newNonce, passwordHashed);
-		
-		//Writing
-		volume.write(reinterpret_cast<char*>(encryptedData), targetFile.gcount());
-	}
-
-	//Updating the metadata
-
-	//Available section metadata
-	uint32_t nextAvailableSector = firstAvailableSector + sectorsNeeded;
-	unsigned char newSectorWrite[bytesForSectorCount];
-	volume.seekp(chacha20NonceSize);
-	for (int i = 0; i < bytesForSectorCount; i++) { //TO FIX RIGHT THIS INSTANCE
-		loadedVolumeMetadata[i] = (nextAvailableSector >> (8 * (bytesForSectorCount - 1 - i))) & 0xFF;
-		newSectorWrite[i] = (nextAvailableSector >> (8 * (bytesForSectorCount - 1 - i))) & 0xFF;
-		cout << "TEMP : Available Section Metadata : " << i << " " << (int)loadedVolumeMetadata[i] << endl;
-	}
-
-	cout << "New Sector Write : " << newSectorWrite << endl;
-
-	volume.write(reinterpret_cast<char*>(newSectorWrite), bytesForSectorCount);
-
-	//Adding the file data to the metadata
-	//I think we need to use 4 bytes for each section code 
-	
-	//Finding the first available char
-	uint32_t firstFreeCharPos = 0;
-
-	for (uint32_t i = bytesForSectorCount; i < volumeMetadataSize; i++) {
-		if (loadedVolumeMetadata[i] == 0) {
-			firstFreeCharPos = i;
-
-			cout << "First Free Char Pos Check" << hex << (int)loadedVolumeMetadata[i] << " " << (int)loadedVolumeMetadata[i + 1] << " " << (int)loadedVolumeMetadata[i + 2] << " " << (int)loadedVolumeMetadata[i + 3] << dec << endl;
-
-			break;
-		}
-	}
-
-	firstFreeCharPos += chacha20NonceSize;
-
-	cout << "TEMP : firstFreeCharPos " << firstFreeCharPos << endl;
-
-	volume.seekp(firstFreeCharPos);
-
-	string filename = fs::path(args[0]).filename().string();
-
-	cout << "Filename : " << filename << endl;
-
-	//Padding string name with 0xFF - this should work because filename should be ASCII
-	while(filename.length() < maxFileLengthName) filename += 0xFF;
-	
-	vector <unsigned char> newSectorDataToWrite(bytesForSectorCount * 2 + filename.size());
-
-	cout << dec << endl;
-
-	for (int i = firstFreeCharPos; i < firstFreeCharPos + bytesForSectorCount; i++) {
-		loadedVolumeMetadata[i] = (firstAvailableSector >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;
-		newSectorDataToWrite[i - firstFreeCharPos] = (firstAvailableSector >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;
-	}
-
-	for (int i = firstFreeCharPos + bytesForSectorCount; i < firstFreeCharPos + 2 * bytesForSectorCount; i++) {
-		loadedVolumeMetadata[i] = (sectorsNeeded >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;
-		newSectorDataToWrite[i - firstFreeCharPos] = (sectorsNeeded >> (8 * (bytesForSectorCount - 1 - i - firstFreeCharPos))) & 0xFF;;
-	}
-
-	uint16_t counter = firstFreeCharPos + 2* bytesForSectorCount;
-
-	for (char character : filename) {
-		loadedVolumeMetadata[counter] = character;
-		newSectorDataToWrite[counter - firstFreeCharPos] = character;
-		counter++;
-	}
-	
-	//Visualising the new sector data to write
-	cout << newSectorDataToWrite.size() << "New Sector Data To Write : " << hex;
-	for (unsigned char sectorByte : newSectorDataToWrite) {
-		cout << static_cast<int>(sectorByte);
-	}
-	cout << dec << endl;
-
-	vector<unsigned char> encryptedNewSectorDataToWrite(newSectorDataToWrite.size());
-
-	//Encrypting newSectorDataToWrite with ChaCha20
-	if (usedAlgorithm == "ChaCha20") {
-		crypto_stream_chacha20_xor(encryptedNewSectorDataToWrite.data(), newSectorDataToWrite.data(), newSectorDataToWrite.size(), loadedVolumeNonce, passwordHashed);
-	}
-
-	volume.write(reinterpret_cast<char*>(encryptedNewSectorDataToWrite.data()), encryptedNewSectorDataToWrite.size());
-
-
-	volume.close();
-	targetFile.close();
-
-	cout << "TEMP : Volume metadata debugging : " << (int)loadedVolumeMetadata[0] << " " << (int)loadedVolumeMetadata[1] << " " << (int)loadedVolumeMetadata[2] << " " << (int)loadedVolumeMetadata[3] << endl;
-}
 
 void CommandCopyToVolume(vector<string> args) {
 	/*Format of the file :
@@ -514,6 +359,11 @@ void CommandCopyToVolume(vector<string> args) {
 	loadedVolumeMetadata[3] = (newFirstAvailableSector) & 0xFF;
 }
 
+void CommandExtractFromVolume(vector<string> args) {
+	string path = args[0] + "\\" + args[1];
+	ofstream writeFile(path, ios::binary);
+}
+
 //Cryptography commands
 void CommandGenerateKeyFile(vector<string> args) {
 
@@ -581,11 +431,13 @@ int main(int argc, char* argv[]){
 	QVBoxLayout* layout = new QVBoxLayout(centralWidget);
 
 	QPushButton* loadVolumeBtn = new QPushButton("Load Volume");
+	QPushButton* loadPasswordBtn = new QPushButton("Load Password");
+	QCheckBox* keyFileCheckbox = new QCheckBox("Keyfile");
 	QPushButton* createVolumeBtn= new QPushButton("Create Volume");
 	QPushButton* volumeDetailsBtn = new QPushButton("Volume Details");
 	QPushButton* addFileBtn = new QPushButton("Add Files To Volume");
 
-	vector <QPushButton*> btns = {loadVolumeBtn, createVolumeBtn, volumeDetailsBtn, addFileBtn};
+	vector <QPushButton*> btns = {loadVolumeBtn, loadPasswordBtn, createVolumeBtn, volumeDetailsBtn, addFileBtn};
 
 	for (QPushButton* btn : btns)
 	{
@@ -595,7 +447,12 @@ int main(int argc, char* argv[]){
 		layout->setAlignment(btn, Qt::AlignCenter); // Center it
 	}
 
-	QLabel* label = new QLabel("Enter volume name:");
+	keyFileCheckbox->setMinimumSize(100, 40);
+	keyFileCheckbox->setMaximumSize(200, 60);
+	layout->addWidget(keyFileCheckbox);
+	layout->setAlignment(keyFileCheckbox, Qt::AlignCenter);
+
+	QLabel* label = new QLabel("Enter volume name / password: ");
 	QLineEdit* input = new QLineEdit();
 
 	//LoadVolume
@@ -609,6 +466,22 @@ int main(int argc, char* argv[]){
 
 		CommandLoadVolume(vector<string> {filePath.toStdString()});
 		cout << "Loaded volume " << filePath.toStdString() << endl;
+	});
+
+	//Load Password
+	QObject::connect(loadPasswordBtn, &QPushButton::clicked, [&]() {
+		if (keyFileCheckbox->isChecked()) {
+			QString filePath = QFileDialog::getOpenFileName(
+				nullptr,
+				"Open Key File",
+				"",
+				"Key Files (*.key);;All Files (*.*)"
+			);
+
+			CommandLoadPassword(vector<string> {(input->text()).toStdString(), filePath.toStdString()});
+		}
+		else CommandLoadPassword(vector<string> {(input->text()).toStdString()});
+		cout << "Loaded password" << endl;
 	});
 
 	//Create Volume
